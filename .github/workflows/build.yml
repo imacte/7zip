@@ -131,8 +131,12 @@ jobs:
     - name: Build 7zz
       run: |
         cd CPP/7zip/Bundles/Alone2
+        # No USE_ASM: "ifdef USE_ASM" only tests whether the variable is defined,
+        # so even USE_ASM=0 turns the assembler rules on (they then call asmc,
+        # which is not installed here). The optimized asm objects need uasm; add
+        # "USE_ASM=1 MY_ASM=uasm" after installing it if they are wanted.
         make -f makefile.gcc -j"$(nproc)" \
-          CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} IS_X64=1 USE_ASM=0
+          CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} IS_X64=1
         ls -l _o
 
     - name: Smoke test

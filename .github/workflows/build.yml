@@ -1,0 +1,167 @@
+# Build 7-Zip from this tree and publish the binaries as artifacts.
+#
+# The language files are part of the artifact: they are not in the upstream source
+# tree (see Lang\), so an artifact of this repository is a complete 7-Zip with
+# translations, ready to unpack over an existing installation.
+name: Build 7-Zip
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+
+  windows:
+    name: windows ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            runner: windows-latest
+          - arch: x64
+            runner: windows-latest
+          # 7-Zip for ARM64 needs armasm64, so it is built on an ARM64 runner
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Build
+      shell: cmd
+      run: |
+        for /f "usebackq tokens=*" %%i in (`vswhere -latest -property installationPath`) do set VS=%%i
+        if "%VS%" == "" echo ERROR: Visual Studio not found & exit /b 1
+        call "%VS%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.arch }}
+        set STOP_ON_ERROR=1
+        set PLATFORM=${{ matrix.arch }}
+        call :build CPP\7zip\Bundles\Format7zF
+        call :build CPP\7zip\UI\Console
+        call :build CPP\7zip\UI\FileManager
+        call :build CPP\7zip\UI\GUI
+        call :build CPP\7zip\Bundles\SFXWin
+        call :build CPP\7zip\Bundles\Alone2
+        exit /b 0
+
+        :build
+        echo == %1 ==
+        pushd %1
+        nmake /nologo PLATFORM=%PLATFORM%
+        set RC=%errorlevel%
+        popd
+        if not "%RC%" == "0" exit /b 1
+        exit /b 0
+
+    - name: Collect the binaries
+      shell: pwsh
+      run: |
+        $p = '${{ matrix.arch }}'
+        $dist = 'dist'
+        New-Item -ItemType Directory -Force $dist | Out-Null
+        $files = @{
+          '7z.dll'   = "CPP/7zip/Bundles/Format7zF/$p/7z.dll"
+          '7z.exe'   = "CPP/7zip/UI/Console/$p/7z.exe"
+          '7zFM.exe' = "CPP/7zip/UI/FileManager/$p/7zFM.exe"
+          '7zG.exe'  = "CPP/7zip/UI/GUI/$p/7zG.exe"
+          '7z.sfx'   = "CPP/7zip/Bundles/SFXWin/$p/7z.sfx"
+          '7zz.exe'  = "CPP/7zip/Bundles/Alone2/$p/7zz.exe"
+        }
+        foreach ($name in $files.Keys)
+        {
+          if (-not (Test-Path $files[$name])) { throw "missing build output: $($files[$name])" }
+          Copy-Item $files[$name] $dist
+        }
+        # the payload data: language files and the text files of the package
+        Copy-Item Lang $dist -Recurse
+        Copy-Item DOC/License.txt, DOC/readme.txt, DOC/copying.txt $dist
+        Get-ChildItem $dist -Recurse -File | Select-Object Name, Length
+
+    - name: Smoke test
+      shell: pwsh
+      run: |
+        $dist = (Resolve-Path dist).Path
+        $work = Join-Path $env:RUNNER_TEMP 'smoke'
+        Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force "$work/in" | Out-Null
+        Set-Content "$work/in/hello.txt" 'hello from the build'
+        $bytes = New-Object byte[] 1048576
+        [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+        [IO.File]::WriteAllBytes("$work/in/data.bin", $bytes)
+        $sha = (Get-FileHash "$work/in/data.bin").Hash
+
+        # note: not "& 7z.exe i | Select-Object -First 3" - stopping the pipeline
+        # early kills the process and makes $LASTEXITCODE non-zero
+        $info = & "$dist\7z.exe" i
+        if ($LASTEXITCODE -ne 0) { throw '7z.exe could not load 7z.dll' }
+        $info | Select-Object -First 3
+        & "$dist\7z.exe" a "$work/test.7z" "$work/in/*" -m0=lzma2 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'creating the archive failed' }
+        & "$dist\7z.exe" t "$work/test.7z" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'testing the archive failed' }
+        & "$dist\7zz.exe" x "$work/test.7z" "-o$work/out" -y | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'extracting the archive failed' }
+        if ((Get-FileHash "$work/out/data.bin").Hash -ne $sha) { throw 'the extracted file differs' }
+        Write-Output 'smoke test ok'
+
+    - uses: actions/upload-artifact@v6
+      with:
+        name: 7zip-windows-${{ matrix.arch }}
+        path: dist
+
+  linux:
+    name: linux ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Build 7zz
+      run: |
+        cd CPP/7zip/Bundles/Alone2
+        make -f makefile.gcc -j"$(nproc)" \
+          CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} IS_X64=1 USE_ASM=0
+        ls -l _o
+
+    - name: Smoke test
+      run: |
+        set -eu
+        BIN=CPP/7zip/Bundles/Alone2/_o/7zz
+        work=$(mktemp -d)
+        "$BIN" i > "$work/formats.txt"
+        head -n 3 "$work/formats.txt"
+        echo hello > "$work/hello.txt"
+        head -c 1048576 /dev/urandom > "$work/data.bin"
+        "$BIN" a "$work/test.7z" "$work/hello.txt" "$work/data.bin" -m0=lzma2
+        "$BIN" t "$work/test.7z"
+        mkdir "$work/out"
+        "$BIN" x "$work/test.7z" -o"$work/out" -y
+        cmp "$work/data.bin" "$work/out/data.bin"
+        echo "smoke test ok"
+
+    - name: Collect the binaries
+      run: |
+        mkdir -p dist
+        cp CPP/7zip/Bundles/Alone2/_o/7zz dist/
+        if [ -f CPP/7zip/Bundles/Alone2/_o/7zzs ]; then cp CPP/7zip/Bundles/Alone2/_o/7zzs dist/; fi
+        cp -r Lang dist/
+        cp DOC/License.txt DOC/readme.txt DOC/copying.txt dist/
+        tar -czf 7zip-linux-${{ matrix.compiler }}.tar.gz dist
+        ls -l 7zip-linux-${{ matrix.compiler }}.tar.gz
+
+    - uses: actions/upload-artifact@v6
+      with:
+        name: 7zip-linux-${{ matrix.compiler }}
+        path: 7zip-linux-${{ matrix.compiler }}.tar.gz

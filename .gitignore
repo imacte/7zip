@@ -1,0 +1,13 @@
+# Output of the makefiles: nmake writes into <bundle>\<platform>, the gcc build
+# into <bundle>/_o. Scoped to the build directories, the Asm\ sources are not
+# affected.
+**/_o/
+/dist/
+/CPP/7zip/Bundles/*/x86/
+/CPP/7zip/Bundles/*/x64/
+/CPP/7zip/Bundles/*/arm/
+/CPP/7zip/Bundles/*/arm64/
+/CPP/7zip/UI/*/x86/
+/CPP/7zip/UI/*/x64/
+/CPP/7zip/UI/*/arm/
+/CPP/7zip/UI/*/arm64/
